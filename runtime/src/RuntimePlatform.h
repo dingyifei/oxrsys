@@ -33,6 +33,9 @@ std::string StateRoot();
 std::string ModuleDirectory(const void* symbolAddress);
 uint64_t ProcessId();
 
+// True when this process is an x86_64 binary translated by Rosetta on Apple Silicon.
+bool RunningUnderRosetta();
+
 // Raise the calling thread's scheduling priority so time-sensitive per-frame
 // work is not delayed behind default-priority threads. Best effort on every
 // platform: failures just keep the default policy.

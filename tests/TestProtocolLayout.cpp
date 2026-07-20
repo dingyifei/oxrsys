@@ -50,10 +50,16 @@ TEST_CASE("C++ protocol layouts match the documented wire format", "[protocol]")
     STATIC_REQUIRE(CLIENT_CAPABILITY_STREAM_RECONFIGURE == 0x00000010);
 
     STATIC_REQUIRE(TRACKING_PACKET_BASE_SIZE == 1008);
-    STATIC_REQUIRE(sizeof(TrackingPacket) == 1032);
-    STATIC_REQUIRE(offsetof(TrackingPacket, sessionEpoch) == 1008);
-    STATIC_REQUIRE(offsetof(TrackingPacket, predictedDisplayTimeNs) == 1016);
-    STATIC_REQUIRE(offsetof(TrackingPacket, predictedDisplayPeriodNs) == 1024);
+    STATIC_REQUIRE(sizeof(TrackingPacket) == 1088);
+    STATIC_REQUIRE(offsetof(TrackingPacket, headLinearVelocity) == 152);
+    STATIC_REQUIRE(offsetof(TrackingPacket, headAngularVelocity) == 164);
+    STATIC_REQUIRE(offsetof(TrackingPacket, leftHandJoints) == 176);
+    STATIC_REQUIRE(offsetof(TrackingPacket, rightHandJoints) == 592);
+    STATIC_REQUIRE(offsetof(TrackingPacket, leftAimPos) == 1008);
+    STATIC_REQUIRE(offsetof(TrackingPacket, rightAimPos) == 1036);
+    STATIC_REQUIRE(offsetof(TrackingPacket, sessionEpoch) == 1064);
+    STATIC_REQUIRE(offsetof(TrackingPacket, predictedDisplayTimeNs) == 1072);
+    STATIC_REQUIRE(offsetof(TrackingPacket, predictedDisplayPeriodNs) == 1080);
     STATIC_REQUIRE(static_cast<uint8_t>(ControlType::FrameFeedback) == 0x88);
     STATIC_REQUIRE(static_cast<uint8_t>(ControlType::TimesyncQuery) == 0x89);
     STATIC_REQUIRE(static_cast<uint8_t>(ControlType::TimesyncResponse) == 0x8A);
@@ -71,10 +77,6 @@ TEST_CASE("C++ protocol layouts match the documented wire format", "[protocol]")
     STATIC_REQUIRE(offsetof(TimesyncQuery, serverTimeNs) == 8);
     STATIC_REQUIRE(sizeof(TimesyncResponse) == 24);
     STATIC_REQUIRE(offsetof(TimesyncResponse, clientTimeNs) == 16);
-    STATIC_REQUIRE(offsetof(TrackingPacket, headLinearVelocity) == 152);
-    STATIC_REQUIRE(offsetof(TrackingPacket, headAngularVelocity) == 164);
-    STATIC_REQUIRE(offsetof(TrackingPacket, leftHandJoints) == 176);
-    STATIC_REQUIRE(offsetof(TrackingPacket, rightHandJoints) == 592);
     STATIC_REQUIRE(TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE == 0x0004);
     STATIC_REQUIRE(TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE == 0x0008);
 }

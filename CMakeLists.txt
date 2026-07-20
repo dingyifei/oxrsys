@@ -159,6 +159,9 @@ add_executable(oxrsys_runtime_tests
     tests/TestCompositionLayerAlpha.cpp
     tests/TestProtocolLayout.cpp
     tests/TestFramePacer.cpp
+    tests/TestAlvrSessionConfig.cpp
+    tests/TestCodecSelect.cpp
+    tests/TestSessionStateMachines.cpp
     tests/TestQuestPassthroughAlphaPolicy.cpp
     tests/TestQuestShellInteraction.cpp
     clients/Android/android-vr/app/src/main/cpp/QuestPassthroughAlphaPolicy.cpp
@@ -170,6 +173,7 @@ add_executable(oxrsys_runtime_tests
     runtime/src/RuntimePlatform.cpp
     runtime/src/RuntimeSockets.cpp
     runtime/src/StreamingFrameQueue.cpp
+    runtime/src/AlvrSessionConfig.cpp
     runtime/src/VulkanDispatch.cpp
 )
 target_include_directories(oxrsys_runtime_tests PRIVATE
@@ -209,6 +213,27 @@ add_test(NAME oxrsys_runtime_logcat_timeout
 set_tests_properties(oxrsys_runtime_logcat_timeout PROPERTIES
     ENVIRONMENT "${OXRSYS_LOGCAT_TEST_ENV}"
     TIMEOUT 10
+)
+add_test(NAME oxrsys_alvr_session_config
+    COMMAND oxrsys_runtime_tests "[alvr-session]"
+)
+set_tests_properties(oxrsys_alvr_session_config PROPERTIES
+    ENVIRONMENT "${OXRSYS_ISOLATED_TEST_ENV}"
+    TIMEOUT 30
+)
+add_test(NAME oxrsys_client_liveness
+    COMMAND oxrsys_runtime_tests "[client-liveness]"
+)
+set_tests_properties(oxrsys_client_liveness PROPERTIES
+    ENVIRONMENT "${OXRSYS_ISOLATED_TEST_ENV}"
+    TIMEOUT 30
+)
+add_test(NAME oxrsys_session_state_machines
+    COMMAND oxrsys_runtime_tests "[session-fsm]"
+)
+set_tests_properties(oxrsys_session_state_machines PROPERTIES
+    ENVIRONMENT "${OXRSYS_ISOLATED_TEST_ENV}"
+    TIMEOUT 30
 )
 
 add_executable(oxrsys_runtime_status_tests

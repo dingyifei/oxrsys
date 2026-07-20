@@ -11,12 +11,14 @@
 #include "StreamingServer.h"
 #include "TrackingReceiver.h"
 #include "RuntimePlatform.h"
+#ifdef OXRSYS_HAS_ALVR
+#include "AlvrStreamingBackend.h"
+#endif
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstring>
-#include <ctime>
 #include <numeric>
 #include <utility>
 
@@ -26,8 +28,8 @@ namespace
 using Clock = std::chrono::steady_clock;
 
 #if !defined(_WIN32)
-// CLOCK_MONOTONIC in nanoseconds — the clock XR_KHR_convert_timespec_time
-// converts against.
+// CLOCK_MONOTONIC in nanoseconds. This is the clock wineopenxr samples when it
+// translates a Win32 QPC value to a timespec for XR_KHR_convert_timespec_time.
 int64_t MonotonicNowNs()
 {
     struct timespec ts{};
@@ -35,6 +37,15 @@ int64_t MonotonicNowNs()
     return static_cast<int64_t>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
 }
 #endif
+
+// steady_clock reading in nanoseconds, for feeding the clock-injected focus-emulation
+// and profile-debounce policies (FocusEmulation.h / ProfileChangeDebounce.h).
+int64_t SteadyNowNs()
+{
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               Clock::now().time_since_epoch())
+        .count();
+}
 
 struct SessionMetricSummary
 {
@@ -114,12 +125,14 @@ Session::Session(Instance* instance, void* metalDevice, void* metalCommandQueue)
     : instance_(instance), graphicsContext_(GraphicsContext::Metal(metalDevice, metalCommandQueue))
 {
     inputManager_ = std::make_unique<InputManager>();
+    inputManager_->SetSimpleControllerFallback(Config::Get().GetValues().simpleControllerFallback);
 
     startTime_ = std::chrono::steady_clock::now();
 #if !defined(_WIN32)
     monoStartNs_ = MonotonicNowNs();
 #endif
     lastFrameTime_ = startTime_;
+    nextFrameDeadline_ = {};
 
     Runtime::Get().RegisterHandle(handle_, this);
     instance_->SetSession(this);
@@ -134,12 +147,14 @@ Session::Session(Instance* instance, const GraphicsContext& graphicsContext)
     : instance_(instance), graphicsContext_(graphicsContext)
 {
     inputManager_ = std::make_unique<InputManager>();
+    inputManager_->SetSimpleControllerFallback(Config::Get().GetValues().simpleControllerFallback);
 
     startTime_ = std::chrono::steady_clock::now();
 #if !defined(_WIN32)
     monoStartNs_ = MonotonicNowNs();
 #endif
     lastFrameTime_ = startTime_;
+    nextFrameDeadline_ = {};
 
     Runtime::Get().RegisterHandle(handle_, this);
     instance_->SetSession(this);
@@ -222,6 +237,56 @@ void Session::TransitionState(XrSessionState newState)
     spdlog::info("OXRSys: Session state -> {}", static_cast<int>(newState));
 }
 
+void Session::MaybeEmitInteractionProfileChanged()
+{
+    if (!inputManager_)
+    {
+        return;
+    }
+    // Signature over both hands. When a streaming client connects the profile resolves
+    // (e.g. from empty to oculus/touch), which must be signalled so the app (Unity's
+    // Input System) re-queries xrGetCurrentInteractionProfile and binds the correct device.
+    // Debounced: only a signature stable for kProfileChangeStableDelay is announced (see
+    // the Session.h member comments for why transients must never reach the app).
+    //
+    // Key on the app-visible (instance-filtered) profile, exactly what
+    // xrGetCurrentInteractionProfile returns — not the raw InputManager profile.
+    // The two can diverge (e.g. the raw profile flips to ext/hand_interaction_ext
+    // for an app that never enabled XR_EXT_hand_interaction, whose visible profile
+    // stays oculus/touch); keying on the raw value would emit a spurious change
+    // event the app cannot observe, the very Unity input churn the debounce exists
+    // to suppress.
+    std::string sig =
+        SelectCurrentInteractionProfileForInstance(instance_, *inputManager_, InputManager::Hand::Left) + "|" +
+        SelectCurrentInteractionProfileForInstance(instance_, *inputManager_, InputManager::Hand::Right);
+
+    const std::string previousPending = interactionProfileDebounce_.pending;
+    const auto decision = oxrsys::EvaluateProfileChangeDebounce(
+        interactionProfileDebounce_, sig, SteadyNowNs(),
+        std::chrono::duration_cast<std::chrono::nanoseconds>(kProfileChangeStableDelay).count());
+    interactionProfileDebounce_ = decision.state;
+
+    // A freshly seen signature just started debouncing.
+    if (!decision.emit && !decision.state.pending.empty() &&
+        decision.state.pending != previousPending)
+    {
+        spdlog::info("OXRSys: interaction profile pending '{}' (debouncing)", sig);
+    }
+    if (!decision.emit)
+    {
+        return;
+    }
+
+    XrEventDataBuffer event{};
+    auto* ip = reinterpret_cast<XrEventDataInteractionProfileChanged*>(&event);
+    ip->type = XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED;
+    ip->next = nullptr;
+    ip->session = reinterpret_cast<XrSession>(handle_);
+    instance_->PushEvent(event);
+    spdlog::info("OXRSys: emitted XrEventDataInteractionProfileChanged (profiles='{}')",
+                 decision.emitted);
+}
+
 XrResult Session::BeginSession(const XrSessionBeginInfo* beginInfo)
 {
     if (beginInfo == nullptr)
@@ -242,6 +307,10 @@ XrResult Session::BeginSession(const XrSessionBeginInfo* beginInfo)
     }
 
     exitRequested_ = false;
+    // Reset focus emulation for the new run: a stale suppressed ratchet would gate the
+    // VISIBLE->FOCUSED transition forever and stall the restarted session at VISIBLE.
+    focusEmulation_ = {};
+    focusEmulation_.lastActiveNs = SteadyNowNs();
     {
         std::scoped_lock lock(frameStateMutex_);
         frameBegun_ = false;
@@ -301,7 +370,7 @@ XrResult Session::RequestExitSession()
     return XR_SUCCESS;
 }
 
-void Session::Shutdown()
+void Session::Shutdown(bool forProcessExit)
 {
     running_ = false;
     exitRequested_ = true;
@@ -320,7 +389,14 @@ void Session::Shutdown()
 
     if (streamingServer_)
     {
-        streamingServer_->Stop();
+        if (forProcessExit)
+        {
+            streamingServer_->StopForProcessExit();
+        }
+        else
+        {
+            streamingServer_->Stop();
+        }
         streamingServer_.reset();
         streamingStarted_ = false;
     }
@@ -413,6 +489,10 @@ XrResult Session::WaitFrame(const XrFrameWaitInfo* frameWaitInfo, XrFrameState* 
         }
     }
 
+    // Signal interaction-profile changes (e.g. streaming client connecting after focus) so
+    // the app rebinds to the correct controller device instead of the simple-controller fallback.
+    MaybeEmitInteractionProfileChanged();
+
     uint32_t targetRefreshHz = 90;
     if (streamingServer_)
     {
@@ -420,12 +500,80 @@ XrResult Session::WaitFrame(const XrFrameWaitInfo* frameWaitInfo, XrFrameState* 
     }
 
     const int64_t nominalPeriodNs = 1000000000ll / targetRefreshHz;
+    FramePacer::Release release = {};
+    auto now = std::chrono::steady_clock::now();
 
-    framePacer_.SetNominalPeriod(nominalPeriodNs);
+    if (streamingServer_ && streamingServer_->UsesClosedLoopFramePacer())
+    {
+        // Native OXRSys protocol: PR #22 phase-locks release to the display clock.
+        framePacer_.SetNominalPeriod(nominalPeriodNs);
+        release = framePacer_.WaitForRelease(oxrsys::runtime_platform::SteadyNowNs());
+        now = std::chrono::steady_clock::now();
 
-    const FramePacer::Release release = framePacer_.WaitForRelease(oxrsys::runtime_platform::SteadyNowNs());
+        // If a later reconnect falls back to an open-loop backend, force a fresh
+        // fallback-grid anchor instead of carrying the native pacer's phase across.
+        nextFrameDeadline_ = {};
+        backendPacedLastFrame_ = false;
+    }
+    else
+    {
+        // Stock ALVR has no display-clock feedback. Preserve the proven absolute
+        // deadline grid, using its vsync estimate only for a one-shot phase anchor.
+        const auto targetFrameTime = std::chrono::nanoseconds(nominalPeriodNs);
+        if (targetRefreshHz != pacedRefreshHz_)
+        {
+            pacedRefreshHz_ = targetRefreshHz;
+            nextFrameDeadline_ = {};
+        }
 
-    const auto now = std::chrono::steady_clock::now();
+        int64_t backendSleepNs = 0;
+        if (streamingServer_ && streamingServer_->GetFramePacing(backendSleepNs) &&
+            backendSleepNs > 0 && backendSleepNs < 2 * targetFrameTime.count())
+        {
+            const auto backendDeadline = now + std::chrono::nanoseconds(backendSleepNs);
+            if (nextFrameDeadline_.time_since_epoch().count() == 0 || !backendPacedLastFrame_)
+            {
+                nextFrameDeadline_ = backendDeadline;
+            }
+            else
+            {
+                nextFrameDeadline_ += targetFrameTime;
+                if (now > nextFrameDeadline_ + targetFrameTime)
+                {
+                    nextFrameDeadline_ = backendDeadline;
+                }
+            }
+            backendPacedLastFrame_ = true;
+        }
+        else
+        {
+            backendPacedLastFrame_ = false;
+            if (nextFrameDeadline_.time_since_epoch().count() == 0)
+            {
+                nextFrameDeadline_ = now;
+            }
+            nextFrameDeadline_ += targetFrameTime;
+            if (now > nextFrameDeadline_ + targetFrameTime)
+            {
+                nextFrameDeadline_ = now + targetFrameTime;
+            }
+        }
+
+        constexpr auto kSpinMargin = std::chrono::microseconds(1500);
+        if (nextFrameDeadline_ - now > kSpinMargin)
+        {
+            std::this_thread::sleep_for((nextFrameDeadline_ - now) - kSpinMargin);
+        }
+        while (std::chrono::steady_clock::now() < nextFrameDeadline_)
+        {
+            std::this_thread::yield();
+        }
+        now = std::chrono::steady_clock::now();
+        release.displayTimeNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                    now.time_since_epoch())
+                                    .count();
+        release.periodNs = nominalPeriodNs;
+    }
 
     const int64_t periodNs = release.periodNs > 0 ? release.periodNs : nominalPeriodNs;
 
@@ -596,6 +744,7 @@ XrResult Session::EndFrame(const XrFrameEndInfo* frameEndInfo)
     CheckStreamingConnection();
     if (streamingServer_ && streamingServer_->IsClientConnected())
     {
+        frameSource.trackingSampleTimestampNs = inputManager_->GetLastTrackingSampleTimestampNs();
         auto sendStart = Clock::now();
         if (lastRenderHasPose_)
         {
@@ -657,21 +806,25 @@ XrResult Session::ValidateSwapchainSubImage(const XrSwapchainSubImage& subImage)
     {
         return XR_ERROR_LAYER_INVALID;
     }
-    if (subImage.imageRect.offset.x < 0 || subImage.imageRect.offset.y < 0)
-    {
-        return XR_ERROR_SWAPCHAIN_RECT_INVALID;
-    }
-    if (subImage.imageRect.extent.width <= 0 || subImage.imageRect.extent.height <= 0)
-    {
-        return XR_ERROR_SWAPCHAIN_RECT_INVALID;
-    }
 
-    const int64_t imageRectMaxX =
-        static_cast<int64_t>(subImage.imageRect.offset.x) + static_cast<int64_t>(subImage.imageRect.extent.width);
-    const int64_t imageRectMaxY =
-        static_cast<int64_t>(subImage.imageRect.offset.y) + static_cast<int64_t>(subImage.imageRect.extent.height);
-    if (imageRectMaxX > static_cast<int64_t>(swapchain->GetWidth()) ||
-        imageRectMaxY > static_cast<int64_t>(swapchain->GetHeight()))
+    // OpenComposite (OpenVR->OpenXR) submits Y-flipped rects to signal the OpenVR
+    // texture origin (bottom-left) vs OpenXR (top-left): e.g. offset.y=height,
+    // extent.height=-height. That is technically out-of-spec (negative extent), but
+    // real runtimes tolerate it. Normalize to a min/max covered region and validate
+    // that, so the flipped rect is accepted as long as it stays in bounds.
+    const int64_t x0 = static_cast<int64_t>(subImage.imageRect.offset.x);
+    const int64_t y0 = static_cast<int64_t>(subImage.imageRect.offset.y);
+    const int64_t x1 = x0 + static_cast<int64_t>(subImage.imageRect.extent.width);
+    const int64_t y1 = y0 + static_cast<int64_t>(subImage.imageRect.extent.height);
+    const int64_t minX = std::min(x0, x1), maxX = std::max(x0, x1);
+    const int64_t minY = std::min(y0, y1), maxY = std::max(y0, y1);
+    if (subImage.imageRect.extent.width == 0 || subImage.imageRect.extent.height == 0)
+    {
+        return XR_ERROR_SWAPCHAIN_RECT_INVALID;
+    }
+    if (minX < 0 || minY < 0 ||
+        maxX > static_cast<int64_t>(swapchain->GetWidth()) ||
+        maxY > static_cast<int64_t>(swapchain->GetHeight()))
     {
         return XR_ERROR_SWAPCHAIN_RECT_INVALID;
     }
@@ -718,10 +871,17 @@ XrResult Session::ValidateProjectionLayer(const XrCompositionLayerProjection& la
         FrameImageSource imageSource =
             swapchain->GetLastReleasedFrameImageSource(view.subImage.imageArrayIndex);
         // Honor the per-view sub-rectangle: UE packs both eyes into one swapchain side-by-side.
-        imageSource.sourceX = static_cast<uint32_t>(view.subImage.imageRect.offset.x);
-        imageSource.sourceY = static_cast<uint32_t>(view.subImage.imageRect.offset.y);
-        imageSource.sourceWidth = static_cast<uint32_t>(view.subImage.imageRect.extent.width);
-        imageSource.sourceHeight = static_cast<uint32_t>(view.subImage.imageRect.extent.height);
+        // Normalize to the min/max covered region first: ValidateSwapchainSubImage tolerates
+        // Y-flipped rects (negative extent, OpenComposite), which would otherwise wrap to
+        // enormous unsigned crop dimensions and drop every frame.
+        const int64_t rectX0 = static_cast<int64_t>(view.subImage.imageRect.offset.x);
+        const int64_t rectY0 = static_cast<int64_t>(view.subImage.imageRect.offset.y);
+        const int64_t rectX1 = rectX0 + static_cast<int64_t>(view.subImage.imageRect.extent.width);
+        const int64_t rectY1 = rectY0 + static_cast<int64_t>(view.subImage.imageRect.extent.height);
+        imageSource.sourceX = static_cast<uint32_t>(std::min(rectX0, rectX1));
+        imageSource.sourceY = static_cast<uint32_t>(std::min(rectY0, rectY1));
+        imageSource.sourceWidth = static_cast<uint32_t>(std::max(rectX0, rectX1) - std::min(rectX0, rectX1));
+        imageSource.sourceHeight = static_cast<uint32_t>(std::max(rectY0, rectY1) - std::min(rectY0, rectY1));
         if (viewIndex == 0)
         {
             frameSource.left = std::move(imageSource);
@@ -847,6 +1007,27 @@ void Session::AdvanceSessionStateAfterFrameSubmission()
         return;
     }
 
+    // Focus emulation: the Quest drops both controllers' active flags while the system
+    // overlay is open (and everything on client disconnect); Unity maps the session
+    // FOCUSED<->VISIBLE transitions to OnApplicationFocus, which is the system-side
+    // pause path. Armed only once input has been seen active on the current connection
+    // so the connect window (controller flags can lag connect by >0.5s) cannot drop
+    // focus. VISIBLE (not SYNCHRONIZED) is also the disconnect state: the frame loop
+    // is identical in both states here and SYNCHRONIZED would only add extra ratchet
+    // transitions on resume.
+    const bool inputActive = inputManager_ && inputManager_->IsStreaming() &&
+                             (inputManager_->IsInputDeviceActive(InputManager::Hand::Left) ||
+                              inputManager_->IsInputDeviceActive(InputManager::Hand::Right));
+    const auto focusDecision = oxrsys::EvaluateFocusEmulation(
+        focusEmulation_, inputActive, state_ == XR_SESSION_STATE_FOCUSED, SteadyNowNs(),
+        std::chrono::duration_cast<std::chrono::nanoseconds>(kFocusLossDelay).count());
+    focusEmulation_ = focusDecision.state;
+    if (focusDecision.suppressFocus)
+    {
+        TransitionState(XR_SESSION_STATE_VISIBLE);
+        return;
+    }
+
     switch (state_)
     {
         case XR_SESSION_STATE_READY:
@@ -858,7 +1039,10 @@ void Session::AdvanceSessionStateAfterFrameSubmission()
             break;
 
         case XR_SESSION_STATE_VISIBLE:
-            TransitionState(XR_SESSION_STATE_FOCUSED);
+            if (!focusEmulation_.suppressed)
+            {
+                TransitionState(XR_SESSION_STATE_FOCUSED);
+            }
             break;
 
         default:
@@ -974,6 +1158,22 @@ XrResult Session::DestroySpace(Space* space)
     return XR_ERROR_HANDLE_INVALID;
 }
 
+void Session::ApplyHapticFeedback(int hand, float amplitude, int64_t durationNs, float frequencyHz)
+{
+    if (!streamingServer_ || !streamingServer_->IsClientConnected())
+    {
+        return;
+    }
+    // XR_MIN_HAPTIC_DURATION (-1) and very short pulses map to a floor the
+    // client motor can actually render.
+    constexpr float kMinDurationS = 0.01f;
+    float durationS = durationNs > 0 ? static_cast<float>(durationNs) * 1e-9f : kMinDurationS;
+    durationS = std::max(durationS, kMinDurationS);
+    // XR_FREQUENCY_UNSPECIFIED (0) passes through; ALVR applies its default.
+    streamingServer_->ApplyHaptics(hand, std::clamp(amplitude, 0.0f, 1.0f), durationS,
+                                   frequencyHz);
+}
+
 void Session::StartStreamingIfNeeded()
 {
     if (streamingStarted_)
@@ -981,7 +1181,23 @@ void Session::StartStreamingIfNeeded()
         return;
     }
 
-    streamingServer_ = std::make_unique<StreamingServer>();
+    const std::string protocol = Config::Get().GetValues().streamingProtocol;
+#ifdef OXRSYS_HAS_ALVR
+    if (protocol == "alvr")
+    {
+        streamingServer_ = std::make_unique<AlvrStreamingBackend>();
+    }
+#else
+    if (protocol == "alvr")
+    {
+        spdlog::warn("OXRSys: protocol=\"alvr\" requested but this build lacks the ALVR "
+                     "backend; falling back to the oxrsys protocol");
+    }
+#endif
+    if (!streamingServer_)
+    {
+        streamingServer_ = std::make_unique<StreamingServer>();
+    }
     streamingServer_->SetGraphicsContext(graphicsContext_);
 
     // Per-eye render resolution for the configured render_device — this must match the
@@ -990,12 +1206,13 @@ void Session::StartStreamingIfNeeded()
     uint32_t width = 0;
     uint32_t height = 0;
     RenderBaseEyeResolution(width, height);
-    uint32_t refreshHz = 90;
+    uint32_t refreshHz = std::max(Config::Get().GetValues().refreshRateHz, 1u);
 
     if (streamingServer_->Start(width, height, refreshHz))
     {
         streamingStarted_ = true;
-        spdlog::info("OXRSys: Streaming server started, waiting for headset connection...");
+        spdlog::info("OXRSys: Streaming server started (protocol={}), waiting for headset connection...",
+                     protocol);
     }
     else
     {
@@ -1017,12 +1234,14 @@ void Session::CheckStreamingConnection()
         std::string clientName = streamingServer_->GetClientName();
         inputManager_->SetTrackingReceiver(streamingServer_->GetTrackingReceiver());
 
-        if (TrackingReceiver* trackingReceiver = streamingServer_->GetTrackingReceiver())
+        if (streamingServer_->UsesClosedLoopFramePacer())
         {
-            trackingReceiver->SetFramePacer(&framePacer_);
+            if (TrackingReceiver* trackingReceiver = streamingServer_->GetTrackingReceiver())
+            {
+                trackingReceiver->SetFramePacer(&framePacer_);
+            }
+            streamingServer_->SetFramePacer(&framePacer_);
         }
-
-        streamingServer_->SetFramePacer(&framePacer_);
         inputManager_->SetStreamingClientName(clientName);
         spdlog::info("OXRSys: Client connected ({}), receiving tracking",
                       clientName);

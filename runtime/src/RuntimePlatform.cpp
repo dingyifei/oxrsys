@@ -23,6 +23,7 @@
 #include <mach/mach_time.h>
 #include <mach/thread_policy.h>
 #include <pthread/qos.h>
+#include <sys/sysctl.h>
 #elif defined(__linux__)
 #include <pthread.h>
 #include <sched.h>
@@ -164,6 +165,21 @@ uint64_t ProcessId()
     return static_cast<uint64_t>(GetCurrentProcessId());
 #else
     return static_cast<uint64_t>(getpid());
+#endif
+}
+
+bool RunningUnderRosetta()
+{
+#if defined(__APPLE__)
+    int translated = 0;
+    size_t size = sizeof(translated);
+    if (sysctlbyname("sysctl.proc_translated", &translated, &size, nullptr, 0) != 0)
+    {
+        return false;
+    }
+    return translated == 1;
+#else
+    return false;
 #endif
 }
 

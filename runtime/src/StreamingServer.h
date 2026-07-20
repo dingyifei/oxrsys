@@ -16,6 +16,8 @@
 
 #include "RuntimeSockets.h"
 #include "GraphicsTypes.h"
+#include "IStreamingBackend.h"
+#include "KeyframeRequestLimiter.h"
 #include "StreamingAbr.h"
 #include "StreamingFrameQueue.h"
 #include "StreamingReconfigure.h"
@@ -38,7 +40,7 @@ class FramePacer;
  * 4. TrackingReceiver feeds pose data into InputManager
  * 5. Stop() → cleans up
  */
-class StreamingServer
+class StreamingServer : public IStreamingBackend
 {
 public:
     enum class State
@@ -49,15 +51,15 @@ public:
     };
 
     StreamingServer();
-    ~StreamingServer();
+    ~StreamingServer() override;
 
     // Non-copyable
     StreamingServer(const StreamingServer&) = delete;
     StreamingServer& operator=(const StreamingServer&) = delete;
 
     // Start broadcasting and listening for clients
-    bool Start(uint32_t renderWidth, uint32_t renderHeight, uint32_t refreshRateHz);
-    void Stop();
+    bool Start(uint32_t renderWidth, uint32_t renderHeight, uint32_t refreshRateHz) override;
+    void Stop() override;
 
     // Queue a rendered frame for asynchronous latest-frame-only encoding.
     // The source owns backend graphics resources until the frame is encoded,
@@ -69,26 +71,27 @@ public:
     // of a later re-prediction. Pass nullptr to fall back to the latest predicted pose.
     void SendFrame(FrameSource frameSource,
                    const float* renderHeadOrientation = nullptr,
-                   const float* renderHeadPosition = nullptr);
+                   const float* renderHeadPosition = nullptr) override;
 
     // Set the platform graphics device for VideoEncoder initialization.
-    void SetGraphicsContext(const GraphicsContext& graphicsContext) { graphicsContext_ = graphicsContext; }
+    void SetGraphicsContext(const GraphicsContext& graphicsContext) override { graphicsContext_ = graphicsContext; }
     void SetGraphicsDevice(void* graphicsDevice) { SetGraphicsContext(GraphicsContext::Metal(graphicsDevice)); }
     void SetMetalDevice(void* metalDevice) { SetGraphicsDevice(metalDevice); }
 
     // Check if a client is connected
-    bool IsClientConnected() const { return state_.load() == State::Connected; }
+    bool IsClientConnected() const override { return state_.load() == State::Connected; }
     State GetState() const { return state_.load(); }
-    uint32_t GetTargetRefreshRateHz() const { return targetRefreshRateHz_.load(); }
+    uint32_t GetTargetRefreshRateHz() const override { return targetRefreshRateHz_.load(); }
 
     // Get the connected client info
-    std::string GetClientName() const;
+    std::string GetClientName() const override;
 
     // Access to tracking receiver (for InputManager integration)
-    TrackingReceiver* GetTrackingReceiver() { return trackingReceiver_.get(); }
+    TrackingReceiver* GetTrackingReceiver() override { return trackingReceiver_.get(); }
 
-    // Sets the frame pacer that receives client feedback and timesync samples
-    void SetFramePacer(FramePacer* framePacer) { framePacer_.store(framePacer); }
+    // Native protocol clients supply PR #22 timing and feedback directly.
+    bool UsesClosedLoopFramePacer() const override { return true; }
+    void SetFramePacer(FramePacer* framePacer) override { framePacer_.store(framePacer); }
 
 private:
     using SocketHandle = oxrsys::runtime_socket::SocketHandle;
@@ -319,6 +322,7 @@ private:
     std::atomic<uint32_t> replacedFrameCount_{0};
     std::atomic<uint32_t> requestKeyframeCount_{0};
     std::atomic<uint32_t> requestKeyframeTotalForAbr_{0};
+    oxrsys::KeyframeRequestLimiter keyframeRequestLimiter_;
     std::atomic<uint32_t> encoderDroppedFramesTotalForAbr_{0};
     std::atomic<uint32_t> videoSendQueueDepthMax_{0};
     std::atomic<uint32_t> videoSendDroppedFrames_{0};

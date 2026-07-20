@@ -325,7 +325,16 @@ struct TrackingPacket
     float rightHandJoints[HAND_JOINT_COUNT][4];
 
     // The first TRACKING_PACKET_BASE_SIZE bytes are the stable prefix. Shorter
-    // packets are accepted and zero filled
+    // packets are accepted and zero filled.
+
+    // Aim (pointer) pose — distinct from the grip pose above. Used for menu lasers.
+    // Quaternion length ~0 means "not provided"; the runtime then falls back to grip.
+    float leftAimPos[3];
+    float leftAimRot[4];   // x, y, z, w
+    float rightAimPos[3];
+    float rightAimRot[4];
+
+    // Optional frame-pacing timing, appended after the backward-compatible aim pose.
     uint32_t sessionEpoch;            // Identifies one client connection
     uint32_t reservedTiming;
     int64_t predictedDisplayTimeNs;   // xrWaitFrame predicted display time, client clock

@@ -15,6 +15,7 @@ runtime_enabled = false
 
 [streaming]
 protocol = "alvr"
+alvr_frame_pacing = "on"
 bitrate_mbps = 85
 fov_degrees = 30
 resolution_scale = 0.8
@@ -52,6 +53,7 @@ quest_logcat = yes
 
     CHECK(values.runtimeEnabled == false);
     CHECK(values.streamingProtocol == "alvr");
+    CHECK(values.alvrFramePacingMode == "on");
     CHECK(values.bitrateMbps == 85);
     CHECK(values.fovDegrees == 100);
     CHECK(values.resolutionScale == 0.8f);
@@ -85,6 +87,7 @@ TEST_CASE("Config parser preserves provided defaults when values are malformed",
     std::istringstream input(R"TOML(
 [streaming]
 protocol = "steamlink"
+alvr_frame_pacing = "turbo"
 bitrate_mbps = nope
 resolution_scale = 2.0
 dynamic_resolution_min_scale = 0.1
@@ -109,6 +112,7 @@ occlusion_mode = "magic"
     defaults.keyframeIntervalSec = 3;
     defaults.videoCodec = "h265";
     defaults.encoderPreset = "speed";
+    defaults.alvrFramePacingMode = "off";
     defaults.foveatedEncodingPreset = "light";
     defaults.clientFoveationPreset = "medium";
     defaults.clientUpscaling = true;
@@ -123,6 +127,7 @@ occlusion_mode = "magic"
     CHECK(values.runtimeEnabled == false);
     // Unknown protocol value keeps the default (oxrsys), never boots the wrong backend.
     CHECK(values.streamingProtocol == "oxrsys");
+    CHECK(values.alvrFramePacingMode == "off");
     CHECK(values.bitrateMbps == 64);
     CHECK(values.resolutionScale == 0.5f);
     CHECK(values.dynamicResolutionMinScale == 0.45f);

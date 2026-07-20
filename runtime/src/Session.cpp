@@ -517,62 +517,76 @@ XrResult Session::WaitFrame(const XrFrameWaitInfo* frameWaitInfo, XrFrameState* 
     }
     else
     {
-        // Stock ALVR has no display-clock feedback. Preserve the proven absolute
-        // deadline grid, using its vsync estimate only for a one-shot phase anchor.
-        const auto targetFrameTime = std::chrono::nanoseconds(nominalPeriodNs);
-        if (targetRefreshHz != pacedRefreshHz_)
+        BackendFrameRelease backendRelease = {};
+        if (streamingServer_ && streamingServer_->WaitForFrameRelease(
+                                    oxrsys::runtime_platform::SteadyNowNs(),
+                                    nominalPeriodNs, backendRelease))
         {
-            pacedRefreshHz_ = targetRefreshHz;
+            release.displayTimeNs = backendRelease.displayTimeServerNs;
+            release.periodNs = backendRelease.periodNs;
+            now = std::chrono::steady_clock::now();
             nextFrameDeadline_ = {};
-        }
-
-        int64_t backendSleepNs = 0;
-        if (streamingServer_ && streamingServer_->GetFramePacing(backendSleepNs) &&
-            backendSleepNs > 0 && backendSleepNs < 2 * targetFrameTime.count())
-        {
-            const auto backendDeadline = now + std::chrono::nanoseconds(backendSleepNs);
-            if (nextFrameDeadline_.time_since_epoch().count() == 0 || !backendPacedLastFrame_)
-            {
-                nextFrameDeadline_ = backendDeadline;
-            }
-            else
-            {
-                nextFrameDeadline_ += targetFrameTime;
-                if (now > nextFrameDeadline_ + targetFrameTime)
-                {
-                    nextFrameDeadline_ = backendDeadline;
-                }
-            }
-            backendPacedLastFrame_ = true;
+            backendPacedLastFrame_ = false;
         }
         else
         {
-            backendPacedLastFrame_ = false;
-            if (nextFrameDeadline_.time_since_epoch().count() == 0)
+            // Stock ALVR and shadow mode preserve the proven absolute deadline
+            // grid, using the backend estimate only for a one-shot phase anchor.
+            const auto targetFrameTime = std::chrono::nanoseconds(nominalPeriodNs);
+            if (targetRefreshHz != pacedRefreshHz_)
             {
-                nextFrameDeadline_ = now;
+                pacedRefreshHz_ = targetRefreshHz;
+                nextFrameDeadline_ = {};
             }
-            nextFrameDeadline_ += targetFrameTime;
-            if (now > nextFrameDeadline_ + targetFrameTime)
-            {
-                nextFrameDeadline_ = now + targetFrameTime;
-            }
-        }
 
-        constexpr auto kSpinMargin = std::chrono::microseconds(1500);
-        if (nextFrameDeadline_ - now > kSpinMargin)
-        {
-            std::this_thread::sleep_for((nextFrameDeadline_ - now) - kSpinMargin);
+            int64_t backendSleepNs = 0;
+            if (streamingServer_ && streamingServer_->GetFramePacing(backendSleepNs) &&
+                backendSleepNs > 0 && backendSleepNs < 2 * targetFrameTime.count())
+            {
+                const auto backendDeadline = now + std::chrono::nanoseconds(backendSleepNs);
+                if (nextFrameDeadline_.time_since_epoch().count() == 0 || !backendPacedLastFrame_)
+                {
+                    nextFrameDeadline_ = backendDeadline;
+                }
+                else
+                {
+                    nextFrameDeadline_ += targetFrameTime;
+                    if (now > nextFrameDeadline_ + targetFrameTime)
+                    {
+                        nextFrameDeadline_ = backendDeadline;
+                    }
+                }
+                backendPacedLastFrame_ = true;
+            }
+            else
+            {
+                backendPacedLastFrame_ = false;
+                if (nextFrameDeadline_.time_since_epoch().count() == 0)
+                {
+                    nextFrameDeadline_ = now;
+                }
+                nextFrameDeadline_ += targetFrameTime;
+                if (now > nextFrameDeadline_ + targetFrameTime)
+                {
+                    nextFrameDeadline_ = now + targetFrameTime;
+                }
+            }
+
+            constexpr auto kSpinMargin = std::chrono::microseconds(1500);
+            if (nextFrameDeadline_ - now > kSpinMargin)
+            {
+                std::this_thread::sleep_for((nextFrameDeadline_ - now) - kSpinMargin);
+            }
+            while (std::chrono::steady_clock::now() < nextFrameDeadline_)
+            {
+                std::this_thread::yield();
+            }
+            now = std::chrono::steady_clock::now();
+            release.displayTimeNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                        now.time_since_epoch())
+                                        .count();
+            release.periodNs = nominalPeriodNs;
         }
-        while (std::chrono::steady_clock::now() < nextFrameDeadline_)
-        {
-            std::this_thread::yield();
-        }
-        now = std::chrono::steady_clock::now();
-        release.displayTimeNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                    now.time_since_epoch())
-                                    .count();
-        release.periodNs = nominalPeriodNs;
     }
 
     const int64_t periodNs = release.periodNs > 0 ? release.periodNs : nominalPeriodNs;
@@ -583,7 +597,9 @@ XrResult Session::WaitFrame(const XrFrameWaitInfo* frameWaitInfo, XrFrameState* 
     // Update input
     inputManager_->Update(dt);
 
-    const int64_t startNs =std::chrono::duration_cast<std::chrono::nanoseconds>(startTime_.time_since_epoch()).count();
+    const int64_t startNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                startTime_.time_since_epoch())
+                                .count();
 
     // The paced tick can step backwards when the timeline relocks, and
     // predicted display times must keep growing frame to frame, so the

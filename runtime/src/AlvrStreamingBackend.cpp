@@ -17,6 +17,7 @@
 #include "AlvrSessionConfig.h"
 #include "CodecSelect.h"
 #include "Config.h"
+#include "RuntimePlatform.h"
 #include "TrackingReceiver.h"
 #include "VideoEncoder.h"
 #include "alvr_server_core.h"
@@ -100,7 +101,17 @@ bool AlvrStreamingBackend::Start(uint32_t renderWidth, uint32_t renderHeight,
     (void)renderHeight;
     targetRefreshRateHz_.store(refreshRateHz);
 
+    if (alvr_get_server_core_api_version() != ALVR_SERVER_CORE_API_VERSION)
+    {
+        spdlog::error("OXRSys/ALVR: server-core API mismatch (expected {}, got {})",
+                      ALVR_SERVER_CORE_API_VERSION, alvr_get_server_core_api_version());
+        return false;
+    }
+
     Config& config = Config::Get();
+    framePacingMode_ = config.GetValues().alvrFramePacingMode;
+    framePacingVersion_.store(0);
+    framePacingSessionEpoch_.store(0);
     const fs::path alvrDir = fs::path(config.appSupportDir) / "alvr";
     std::error_code ec;
     fs::create_directories(alvrDir, ec);
@@ -123,6 +134,20 @@ bool AlvrStreamingBackend::Start(uint32_t renderWidth, uint32_t renderHeight,
 
     alvr_initialize_environment(configDir.c_str(), configDir.c_str());
     alvr_initialize_logging(sessionLogPath.c_str(), crashLogPath.c_str());
+
+    // Must precede alvr_initialize: OFF advertises pacing version 0 so stock and
+    // enhanced clients stay on the legacy path; SHADOW reports telemetry without
+    // changing client frame selection; ACTIVE drives closed-loop selection.
+    uint8_t pacingMode = ALVR_FRAME_PACING_MODE_OFF;
+    if (framePacingMode_ == "shadow")
+    {
+        pacingMode = ALVR_FRAME_PACING_MODE_SHADOW;
+    }
+    else if (framePacingMode_ == "on")
+    {
+        pacingMode = ALVR_FRAME_PACING_MODE_ACTIVE;
+    }
+    alvr_set_frame_pacing_mode(pacingMode);
 
     const AlvrTargetConfig target = alvr_initialize();
     streamWidth_.store(target.stream_width);
@@ -178,6 +203,12 @@ void AlvrStreamingBackend::StopInternal(bool skipAlvrShutdown)
         encoder_.reset();
     }
     connected_.store(false);
+    framePacingVersion_.store(0);
+    framePacingSessionEpoch_.store(0);
+    {
+        std::lock_guard<std::mutex> lock(displayTargetsMutex_);
+        unsettledDisplayTargets_.clear();
+    }
     if (skipAlvrShutdown)
     {
         // Process exit / dylib unload: alvr_shutdown() drops ServerCoreContext
@@ -205,6 +236,15 @@ void AlvrStreamingBackend::SendFrame(FrameSource frameSource,
     frame.timestampNs = frameSource.trackingSampleTimestampNs != 0
                             ? frameSource.trackingSampleTimestampNs
                             : static_cast<int64_t>(latestTrackingTimestampNs_.load());
+    if (framePacingVersion_.load() == ALVR_FRAME_PACING_VERSION_1)
+    {
+        const int64_t unsettledTarget = framePacer_.GetCurrentTargetDisplayClientNs();
+        RememberUnsettledTarget(static_cast<uint64_t>(frame.timestampNs), unsettledTarget);
+        if (framePacingMode_ == "on")
+        {
+            frame.targetDisplayClientNs = framePacer_.GetSettledTargetDisplayClientNs();
+        }
+    }
     frame.source = std::move(frameSource);
     frame.valid = true;
     // ALVR latency decomposition: "present" marks the game handing the frame
@@ -224,6 +264,22 @@ void AlvrStreamingBackend::ApplyHaptics(int hand, float amplitude, float duratio
                       amplitude);
 }
 
+bool AlvrStreamingBackend::WaitForFrameRelease(int64_t nowServerNs, int64_t nominalPeriodNs,
+                                                BackendFrameRelease& outRelease)
+{
+    if (!connected_.load() || framePacingMode_ != "on" ||
+        framePacingVersion_.load() != ALVR_FRAME_PACING_VERSION_1)
+    {
+        return false;
+    }
+
+    framePacer_.SetNominalPeriod(nominalPeriodNs);
+    const FramePacer::Release release = framePacer_.WaitForRelease(nowServerNs);
+    outRelease.displayTimeServerNs = release.displayTimeNs;
+    outRelease.periodNs = release.periodNs > 0 ? release.periodNs : nominalPeriodNs;
+    return outRelease.displayTimeServerNs > 0 && outRelease.periodNs > 0;
+}
+
 bool AlvrStreamingBackend::GetFramePacing(int64_t& outSleepNs)
 {
     if (!connected_.load())
@@ -237,6 +293,64 @@ bool AlvrStreamingBackend::GetFramePacing(int64_t& outSleepNs)
     }
     outSleepNs = static_cast<int64_t>(untilVsyncNs);
     return true;
+}
+
+void AlvrStreamingBackend::RefreshFramePacingCapabilities()
+{
+    AlvrFramePacingCapabilities capabilities = {};
+    if (!alvr_get_frame_pacing_capabilities(&capabilities))
+    {
+        framePacingVersion_.store(0);
+        framePacingSessionEpoch_.store(0);
+        return;
+    }
+
+    framePacingVersion_.store(capabilities.negotiated_version);
+    framePacingSessionEpoch_.store(capabilities.session_epoch);
+    if (capabilities.negotiated_version == ALVR_FRAME_PACING_VERSION_1)
+    {
+        // Force an epoch reset before any new timing or timesync event can race
+        // the reconnect. The zero display time is ignored until clock sync is stable.
+        const int64_t nominalPeriodNs = 1000000000ll /
+            std::max<uint32_t>(targetRefreshRateHz_.load(), 1u);
+        framePacer_.OnClientTiming(capabilities.session_epoch, 0, nominalPeriodNs);
+    }
+    {
+        std::lock_guard<std::mutex> lock(displayTargetsMutex_);
+        unsettledDisplayTargets_.clear();
+    }
+    spdlog::info("OXRSys/ALVR: frame pacing supported={} negotiated={} mode={} epoch={}",
+                 capabilities.supported_version, capabilities.negotiated_version,
+                 framePacingMode_, capabilities.session_epoch);
+}
+
+void AlvrStreamingBackend::RememberUnsettledTarget(uint64_t frameTimestampNs,
+                                                    int64_t targetDisplayClientNs)
+{
+    if (frameTimestampNs == 0 || targetDisplayClientNs <= 0)
+    {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(displayTargetsMutex_);
+    unsettledDisplayTargets_.emplace_back(frameTimestampNs, targetDisplayClientNs);
+    while (unsettledDisplayTargets_.size() > kDisplayTargetHistorySize)
+    {
+        unsettledDisplayTargets_.pop_front();
+    }
+}
+
+int64_t AlvrStreamingBackend::FindUnsettledTarget(uint64_t frameTimestampNs) const
+{
+    std::lock_guard<std::mutex> lock(displayTargetsMutex_);
+    for (auto it = unsettledDisplayTargets_.rbegin();
+         it != unsettledDisplayTargets_.rend(); ++it)
+    {
+        if (it->first == frameTimestampNs)
+        {
+            return it->second;
+        }
+    }
+    return 0;
 }
 
 void AlvrStreamingBackend::RefreshNegotiatedConfig()
@@ -325,8 +439,20 @@ double AlvrStreamingBackend::SubmitEncodedFrame(PendingEncodedFrame& frame)
     }
 
     const auto sendStart = std::chrono::steady_clock::now();
-    alvr_send_video_nal(frame.timestampNs, frame.data.data(),
-                        static_cast<int32_t>(frame.data.size()), frame.isIdr);
+    if (framePacingVersion_.load() == ALVR_FRAME_PACING_VERSION_1)
+    {
+        if (!alvr_send_video_nal_paced(frame.timestampNs, frame.displayTargetClientNs,
+                                        frame.data.data(),
+                                        static_cast<int32_t>(frame.data.size()), frame.isIdr))
+        {
+            spdlog::debug("OXRSys/ALVR: paced video submission rejected");
+        }
+    }
+    else
+    {
+        alvr_send_video_nal(frame.timestampNs, frame.data.data(),
+                            static_cast<int32_t>(frame.data.size()), frame.isIdr);
+    }
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - sendStart)
         .count();
 }
@@ -362,6 +488,8 @@ void AlvrStreamingBackend::EncodeThread()
 
         auto pending = std::make_shared<PendingEncodedFrame>();
         pending->timestampNs = static_cast<uint64_t>(frame.timestampNs);
+        pending->displayTargetClientNs = static_cast<uint64_t>(
+            std::max<int64_t>(frame.targetDisplayClientNs, 0));
 
         alvr_report_composed(pending->timestampNs, 0);
 
@@ -649,6 +777,16 @@ void AlvrStreamingBackend::EventThread()
 
     while (running_.load())
     {
+        if (framePacingMode_ != "off" &&
+            framePacingVersion_.load() == ALVR_FRAME_PACING_VERSION_1)
+        {
+            const int64_t nowNs = oxrsys::runtime_platform::SteadyNowNs();
+            if (framePacer_.ClaimTimesyncQuerySlot(nowNs))
+            {
+                alvr_send_frame_pacing_timesync(static_cast<uint64_t>(nowNs));
+            }
+        }
+
         if (connected_.load() && !trackingStaleWarned &&
             lastTrackingArrival != SteadyClock::time_point{} &&
             SteadyClock::now() - lastTrackingArrival > std::chrono::milliseconds(500))
@@ -668,11 +806,18 @@ void AlvrStreamingBackend::EventThread()
         {
             case ALVR_EVENT_CLIENT_CONNECTED:
                 RefreshNegotiatedConfig();
+                RefreshFramePacingCapabilities();
                 connected_.store(true);
                 spdlog::info("OXRSys/ALVR: client connected");
                 break;
             case ALVR_EVENT_CLIENT_DISCONNECTED:
                 connected_.store(false);
+                framePacingVersion_.store(0);
+                framePacingSessionEpoch_.store(0);
+                {
+                    std::lock_guard<std::mutex> lock(displayTargetsMutex_);
+                    unsettledDisplayTargets_.clear();
+                }
                 lastTrackingArrival = {};
                 trackingStaleWarned = false;
                 spdlog::info("OXRSys/ALVR: client disconnected");
@@ -731,6 +876,51 @@ void AlvrStreamingBackend::EventThread()
                 spdlog::warn("OXRSys/ALVR: shutdown pending");
                 connected_.store(false);
                 break;
+            case ALVR_EVENT_FRAME_PACING_DISPLAY_TIMING:
+            {
+                const auto& timing = event.frame_pacing_display_timing.timing;
+                framePacer_.OnClientTiming(timing.session_epoch,
+                                           static_cast<int64_t>(timing.predicted_display_time_ns),
+                                           static_cast<int64_t>(timing.predicted_display_period_ns));
+                break;
+            }
+            case ALVR_EVENT_FRAME_PACING_TIMESYNC_RESPONSE:
+            {
+                const auto& response = event.frame_pacing_timesync_response.response;
+                const int64_t clientMidpointNs = static_cast<int64_t>(
+                    response.client_receive_time_ns +
+                    (response.client_send_time_ns - response.client_receive_time_ns) / 2);
+                framePacer_.OnTimesyncSample(
+                    static_cast<int64_t>(response.server_send_time_ns), clientMidpointNs,
+                    oxrsys::runtime_platform::SteadyNowNs());
+                break;
+            }
+            case ALVR_EVENT_FRAME_PACING_FRAME_FEEDBACK:
+            {
+                const auto& feedback = event.frame_pacing_frame_feedback.feedback;
+                const bool fresh = (feedback.flags & ALVR_FRAME_FEEDBACK_FLAG_FRESH) != 0;
+
+                // Display-lag attribution is only meaningful for freshly displayed
+                // frames. A reused frame keeps its original display_target_time_ns
+                // while predicted_display_time_ns advances every vsync, so feeding
+                // reuse here would drag the pose-target servo toward its maximum on
+                // ordinary decode/network gaps. Matches StreamingServer's fresh gate.
+                const int64_t unsettledTarget = FindUnsettledTarget(feedback.frame_timestamp_ns);
+                if (fresh && unsettledTarget > 0 && feedback.predicted_display_time_ns > 0)
+                {
+                    framePacer_.OnDisplayLag(
+                        static_cast<int64_t>(feedback.predicted_display_time_ns) -
+                        unsettledTarget);
+                }
+
+                FramePacer::FeedbackSample sample = {};
+                sample.fresh = fresh;
+                sample.slackValid =
+                    (feedback.flags & ALVR_FRAME_FEEDBACK_FLAG_SLACK_VALID) != 0;
+                sample.acquireSlackNs = feedback.acquire_slack_ns;
+                framePacer_.OnFrameFeedback(sample, oxrsys::runtime_platform::SteadyNowNs());
+                break;
+            }
             default:
                 break;
         }

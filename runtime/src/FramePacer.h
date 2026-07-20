@@ -78,7 +78,8 @@ public:
      * A changed sessionEpoch resets the clock offset estimator and all
      * learned pacing state. The current render lead survives the reset.
      */
-    void OnClientTiming(uint32_t sessionEpoch,int64_t clientPredictedDisplayNs, int64_t clientPeriodNs);
+    void OnClientTiming(uint64_t sessionEpoch, int64_t clientPredictedDisplayNs,
+                        int64_t clientPeriodNs);
 
     /** Feeds one timesync round trip into the clock offset estimator. */
     void OnTimesyncSample(int64_t serverSendNs, int64_t clientTimeNs, int64_t serverReceiveNs);
@@ -212,7 +213,7 @@ private:
     bool timerRunning_ = false;
 
     ClockOffsetEstimator offsetEstimator_;
-    uint32_t sessionEpoch_ = 0;
+    uint64_t sessionEpoch_ = 0;
 
     int64_t nominalPeriodNs_ = 0;
     int64_t timelinePeriodNs_ = 0;

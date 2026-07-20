@@ -66,6 +66,7 @@ This project uses AI-generated code and documentation. We appreciate professiona
 - [Build and versioning](docs/build.md)
 - [Architecture](docs/architecture.md)
 - [Protocol](docs/protocol.md)
+- [Embedded ALVR backend](docs/alvr-backend.md)
 - [Simulator](docs/simulator.md)
 - [Quest](docs/platforms/quest.md)
 - [macOS Home](docs/platforms/macos-home.md)

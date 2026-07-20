@@ -411,6 +411,14 @@ ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults)
                     values.streamingProtocol = value;
                 }
             }
+            else if (key == "alvr_frame_pacing")
+            {
+                value = ParseString(value);
+                if (value == "off" || value == "shadow" || value == "on")
+                {
+                    values.alvrFramePacingMode = value;
+                }
+            }
             else if (key == "foveated_encoding_preset")
             {
                 value = ParseString(value);

@@ -71,7 +71,8 @@ void FramePacer::SetNominalPeriod(int64_t periodNs)
     timelineLocked_ = false;
 }
 
-void FramePacer::OnClientTiming(uint32_t sessionEpoch,int64_t clientPredictedDisplayNs, int64_t clientPeriodNs)
+void FramePacer::OnClientTiming(uint64_t sessionEpoch, int64_t clientPredictedDisplayNs,
+                                int64_t clientPeriodNs)
 {
     if (clientPeriodNs <= 0)
     {

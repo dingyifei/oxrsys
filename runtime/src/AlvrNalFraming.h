@@ -18,6 +18,7 @@ namespace oxrsys::alvr
 struct PendingEncodedFrame
 {
     uint64_t timestampNs = 0;
+    uint64_t displayTargetClientNs = 0;
     bool isIdr = false;
     std::vector<uint8_t> config;
     std::vector<uint8_t> data;

@@ -7,6 +7,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -15,6 +16,7 @@
 #include <vector>
 
 #include "AlvrNalFraming.h"
+#include "FramePacer.h"
 #include "KeyframeRequestLimiter.h"
 #include "IStreamingBackend.h"
 #include "StreamingFrameQueue.h"
@@ -63,6 +65,8 @@ public:
     uint32_t GetTargetRefreshRateHz() const override { return targetRefreshRateHz_.load(); }
     std::string GetClientName() const override;
     TrackingReceiver* GetTrackingReceiver() override { return trackingReceiver_.get(); }
+    bool WaitForFrameRelease(int64_t nowServerNs, int64_t nominalPeriodNs,
+                             BackendFrameRelease& outRelease) override;
     bool GetFramePacing(int64_t& outSleepNs) override;
     void ApplyHaptics(int hand, float amplitude, float durationSeconds,
                       float frequencyHz) override;
@@ -143,10 +147,21 @@ private:
     // oxrsys-runtime.toml stays the single source of truth for bitrate, and
     // client-side buffering is capped (max_buffering_frames).
     void SyncSessionSettings();
+    void RefreshFramePacingCapabilities();
+    void RememberUnsettledTarget(uint64_t frameTimestampNs, int64_t targetDisplayClientNs);
+    int64_t FindUnsettledTarget(uint64_t frameTimestampNs) const;
 
     std::atomic<bool> running_{false};
     std::atomic<bool> connected_{false};
     std::atomic<uint32_t> targetRefreshRateHz_{72};
+
+    FramePacer framePacer_;
+    std::string framePacingMode_ = "shadow";
+    std::atomic<uint16_t> framePacingVersion_{0};
+    std::atomic<uint64_t> framePacingSessionEpoch_{0};
+    mutable std::mutex displayTargetsMutex_;
+    std::deque<std::pair<uint64_t, int64_t>> unsettledDisplayTargets_;
+    static constexpr size_t kDisplayTargetHistorySize = 512;
 
     // Latest tracking sample timestamp from the client (ALVR time domain).
     // Video frames must be tagged with a value from this domain.

@@ -60,6 +60,17 @@ encoder_preset = "balanced"
 # H.264 and clients without the capability continue to receive 8-bit video.
 encoder_10bit = false
 
+# Streaming backend: "oxrsys" for the native OXRSys clients, or "alvr" for the
+# embedded ALVR v20.14.1 server core.
+protocol = "oxrsys"
+
+# ALVR display-clock pacing: "off" advertises pacing version 0 so every client stays
+# fully on the legacy path; "shadow" collects timing/feedback telemetry while both server
+# release and client frame selection keep their proven open-loop behavior; "on" enables
+# closed-loop server release and target-aware client frame selection once the enhanced
+# client negotiates extension version 1. Stock clients always stay on the fallback grid.
+alvr_frame_pacing = "shadow"
+
 # Streaming transport: "auto" tries USB ADB reverse and WiFi, "wifi" disables USB TCP
 # listeners, and "usb_adb" disables WiFi discovery fallback.
 transport = "auto"

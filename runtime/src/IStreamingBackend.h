@@ -9,6 +9,12 @@
 
 class TrackingReceiver;
 
+struct BackendFrameRelease
+{
+    int64_t displayTimeServerNs = 0;
+    int64_t periodNs = 0;
+};
+
 /**
  * Interface between Session and a streaming backend implementation.
  *
@@ -63,6 +69,14 @@ public:
     // grid below until they negotiate an equivalent timing extension.
     virtual bool UsesClosedLoopFramePacer() const { return false; }
     virtual void SetFramePacer(class FramePacer* /*framePacer*/) {}
+
+    // A backend-owned closed-loop pacer may block until its next release and
+    // return the target display tick. False keeps Session on its fallback grid.
+    virtual bool WaitForFrameRelease(int64_t /*nowServerNs*/, int64_t /*nominalPeriodNs*/,
+                                     BackendFrameRelease& /*outRelease*/)
+    {
+        return false;
+    }
 
     // Open-loop phase hint (nanoseconds until the next estimated client vsync).
     // Session uses this only to anchor its fallback grid, never to re-anchor each frame.

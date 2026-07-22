@@ -150,7 +150,9 @@ TEST_CASE("Delivery stalls beyond the gate neither bump nor block decay", "[pace
         simulator.FeedStale();
         simulator.FeedStale();
         simulator.FeedStale();
-        simulator.FeedFreshLate(3 * kPeriodNs);
+        // Beyond the stall gate: no achievable lead could have caught this, so
+        // it must not bump the lead away from the 7 ms chain floor.
+        simulator.FeedFreshLate(9 * kPeriodNs);
     }
 
     CHECK(pacer.GetRenderLeadNs() == chainNs + kFloorMarginNs);
@@ -185,10 +187,24 @@ TEST_CASE("Chains beyond the default lead converge, capped at three periods", "[
         CHECK(pacer.GetRenderLeadNs() == longChainNs + kFloorMarginNs);
     }
 
-    SECTION("a 45 ms chain stops exactly at the absolute cap")
+    SECTION("a deep 65 ms chain learns its real floor, not the cap")
     {
-        simulator.RunChainSeconds(30, 45'000'000);
-        CHECK(pacer.GetRenderLeadNs() == 3 * kPeriodNs);
+        // Rosetta + WiFi + standalone decode: the required lead exceeds the old
+        // 3-period cap. The floor must learn the real chain depth (it railed at
+        // the cap before). The lead rides at least the floor; the miss-heavy
+        // bootstrap earns a standing margin above it, which then decays.
+        const int64_t deepChainNs = 65'000'000;
+        simulator.RunChainSeconds(30, deepChainNs);
+        CHECK(pacer.GetLeadFloorNs() == deepChainNs + kFloorMarginNs);
+        CHECK(pacer.GetRenderLeadNs() >= deepChainNs + kFloorMarginNs);
+        CHECK(pacer.GetRenderLeadNs() <= 8 * kPeriodNs);
+    }
+
+    SECTION("a chain beyond the absolute cap stops exactly at the cap")
+    {
+        // 8 periods = ~111ms; a 130ms chain still rails, as designed.
+        simulator.RunChainSeconds(40, 130'000'000);
+        CHECK(pacer.GetRenderLeadNs() == 8 * kPeriodNs);
     }
 }
 

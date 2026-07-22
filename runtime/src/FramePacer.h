@@ -164,9 +164,16 @@ private:
     // the current lead once frames arrive a whole slot early and the floor
     // ratchets to the cap.
 
-    // Startup lead, deliberately generous until the floor warms
+    // Startup lead, deliberately generous until the floor warms.
+    // MaxRenderLeadPeriods caps how far ahead of the display tick the app is
+    // woken to render. The required lead is the server-to-client half of the
+    // pipeline (render + encode + network + decode up to the acquire deadline),
+    // which is a few ms on native/USB but ~65ms on Rosetta + WiFi + standalone
+    // decode. The cap is sized above that so the learned floor is not clipped;
+    // it only binds when the real pipeline needs it, so a low-latency client
+    // still learns a small lead.
     static constexpr int64_t DefaultRenderLeadNs = 20'000'000;
-    static constexpr int64_t MaxRenderLeadPeriods = 3;
+    static constexpr int64_t MaxRenderLeadPeriods = 8;
     static constexpr int64_t LeadSlewPerSecondNs = 250'000;
 
     // Three misses separate a trend from a stray outlier
@@ -174,7 +181,13 @@ private:
     static constexpr int64_t LeadLimitedMissGapNs = 10'000'000'000;
     static constexpr int64_t MinLeadBumpNs = 500'000;
     static constexpr int64_t BumpMarginNs = 500'000;
-    static constexpr int64_t StallGatePeriods = 2;
+    // Lateness beyond this is treated as an unfixable delivery stall and kept
+    // out of the lead law. It must track the max representable lead: a frame
+    // later than the most lead we could ever apply cannot be fixed by more
+    // lead, but a frame within that range must be allowed to bump the lead up
+    // (otherwise a deep pipeline can never bootstrap from the startup lead,
+    // since its first samples are negative slack larger than a couple periods).
+    static constexpr int64_t StallGatePeriods = MaxRenderLeadPeriods;
     static constexpr int64_t MinLeadFloorNs = 1'000'000;
     static constexpr int64_t FloorMarginNs = 1'000'000;
 
@@ -191,10 +204,22 @@ private:
     // and a bounded step so one outlier cannot yank the pose target. The
     // servo counts as settled after a run of feedbacks with small residual
     // lag, which gates the target carried in video frame headers.
+    //
+    // The clamp and settle tolerance must span the full end-to-end display lag
+    // (predicted-display minus release tick), which is the whole render + encode
+    // + network + decode + compositor pipeline. On a low-latency native/USB path
+    // that is a few ms; on a Rosetta + WiFi + standalone-decode path it is
+    // 55-120ms (4-9 periods at 72Hz). The clamp is sized well above that so the
+    // servo can represent the real offset instead of railing, and the settle
+    // tolerance is ~half a period so ordinary decoder jitter (the decode time
+    // swings 25-48ms frame to frame) does not perpetually reset the streak.
     static constexpr double DisplayOffsetGain = 0.1;
-    static constexpr int64_t MaxDisplayOffsetStepNs = 1'000'000;
-    static constexpr int64_t MaxDisplayOffsetPeriods = 4;
+    static constexpr int64_t MaxDisplayOffsetStepNs = 2'000'000;
+    static constexpr int64_t MaxDisplayOffsetPeriods = 10;
     static constexpr int64_t DisplayOffsetSettleNs = 500'000'000;
+    // Residual lag below which a feedback counts toward the settle streak.
+    // Half a period tolerates the inherent per-frame decode/vsync jitter.
+    static constexpr double DisplayOffsetSettleTolerancePeriods = 0.5;
 
     int64_t GetPeriodNsLocked() const;
     int64_t GetMaxRenderLeadNsLocked() const;

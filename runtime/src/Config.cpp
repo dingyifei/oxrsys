@@ -419,6 +419,14 @@ ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults)
                     values.alvrFramePacingMode = value;
                 }
             }
+            else if (key == "alvr_max_buffering_frames")
+            {
+                float val = std::stof(value);
+                if (val >= 1.0f && val <= 4.0f)
+                {
+                    values.alvrMaxBufferingFrames = val;
+                }
+            }
             else if (key == "foveated_encoding_preset")
             {
                 value = ParseString(value);

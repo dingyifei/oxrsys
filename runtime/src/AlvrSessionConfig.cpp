@@ -3,6 +3,7 @@
 #include "AlvrSessionConfig.h"
 
 #include <regex>
+#include <sstream>
 
 namespace oxrsys::alvr
 {
@@ -49,7 +50,8 @@ const char* MinimalSessionJson()
     return kMinimalSessionJson;
 }
 
-std::string ApplySessionSettings(const std::string& json, uint32_t bitrateMbps)
+std::string ApplySessionSettings(const std::string& json, uint32_t bitrateMbps,
+                                 float maxBufferingFrames)
 {
     // Targeted key rewrites instead of a JSON library: ALVR rewrites the file
     // with its full settings tree, so both keys exist after first run.
@@ -62,7 +64,9 @@ std::string ApplySessionSettings(const std::string& json, uint32_t bitrateMbps)
         std::regex_replace(json, bitrateRe, "\"ConstantMbps\": " + std::to_string(bitrateMbps));
     // Cap client-side frame queueing: larger values let server pacing drift pool
     // into standing latency before the vsync queue overflows into stutter.
-    updated = std::regex_replace(updated, bufferingRe, "\"max_buffering_frames\": 1.5");
+    std::ostringstream bufferingValue;
+    bufferingValue << "\"max_buffering_frames\": " << maxBufferingFrames;
+    updated = std::regex_replace(updated, bufferingRe, bufferingValue.str());
     return updated;
 }
 

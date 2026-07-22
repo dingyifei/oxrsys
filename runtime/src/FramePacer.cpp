@@ -262,7 +262,10 @@ void FramePacer::OnDisplayLag(int64_t displayLagNs)
         return;
     }
 
-    if (std::abs(displayLagNs) < GetPeriodNsLocked() / 4)
+    const int64_t settleToleranceNs = static_cast<int64_t>(
+        DisplayOffsetSettleTolerancePeriods * static_cast<double>(GetPeriodNsLocked()));
+
+    if (std::abs(displayLagNs) < settleToleranceNs)
     {
         displayOffsetSettleStreak_ = std::min(displayOffsetSettleStreak_ + 1, GetSettleStreakLimitLocked());
     }

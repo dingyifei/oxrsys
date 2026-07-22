@@ -50,30 +50,29 @@ TEST_CASE("MinimalSessionJson seeds auto-trust, bitrate, and absolute resolution
 
 TEST_CASE("ApplySessionSettings rewrites the bitrate seed from the toml", "[alvr-session]")
 {
-    const std::string synced = ApplySessionSettings(MinimalSessionJson(), 40);
+    const std::string synced = ApplySessionSettings(MinimalSessionJson(), 40, 1.5f);
     // Seed 60 -> 40, but the variant tag must survive (regex keyed on position).
     CHECK(Contains(synced, "\"ConstantMbps\": 40"));
     CHECK_FALSE(Contains(synced, "\"ConstantMbps\": 60"));
     CHECK(Contains(synced, "\"variant\": \"ConstantMbps\""));
-    // max_buffering_frames is capped at 1.5 regardless of bitrate.
     CHECK(Contains(synced, "\"max_buffering_frames\": 1.5"));
 }
 
-TEST_CASE("ApplySessionSettings caps a large max_buffering_frames", "[alvr-session]")
+TEST_CASE("ApplySessionSettings applies the configured max_buffering_frames", "[alvr-session]")
 {
     const std::string json = R"({ "video": { "max_buffering_frames": 4.0,
         "bitrate": { "mode": { "variant": "ConstantMbps", "ConstantMbps": 100 } } } })";
-    const std::string synced = ApplySessionSettings(json, 30);
-    CHECK(Contains(synced, "\"max_buffering_frames\": 1.5"));
+    const std::string synced = ApplySessionSettings(json, 30, 1.0f);
+    CHECK(Contains(synced, "\"max_buffering_frames\": 1"));
     CHECK_FALSE(Contains(synced, "\"max_buffering_frames\": 4.0"));
     CHECK(Contains(synced, "\"ConstantMbps\": 30"));
 }
 
 TEST_CASE("ApplySessionSettings is idempotent", "[alvr-session]")
 {
-    const std::string once = ApplySessionSettings(MinimalSessionJson(), 40);
-    const std::string twice = ApplySessionSettings(once, 40);
-    // Re-applying the same bitrate must not perturb the already-synced document
+    const std::string once = ApplySessionSettings(MinimalSessionJson(), 40, 1.5f);
+    const std::string twice = ApplySessionSettings(once, 40, 1.5f);
+    // Re-applying the same settings must not perturb the already-synced document
     // (this equality is what SyncSessionSettings uses to skip rewriting the file).
     CHECK(twice == once);
 }
@@ -81,7 +80,7 @@ TEST_CASE("ApplySessionSettings is idempotent", "[alvr-session]")
 TEST_CASE("ApplySessionSettings leaves a document with neither key unchanged", "[alvr-session]")
 {
     const std::string json = R"({ "session_settings": { "connection": {} } })";
-    CHECK(ApplySessionSettings(json, 55) == json);
+    CHECK(ApplySessionSettings(json, 55, 1.5f) == json);
 }
 
 TEST_CASE("ParseNegotiatedConfig extracts eye resolution and refresh rate", "[alvr-session]")

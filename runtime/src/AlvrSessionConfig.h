@@ -24,7 +24,8 @@ const char* MinimalSessionJson();
 // result equals the input when both keys already hold the target values (the
 // caller uses that equality to skip rewriting the file). A missing key is left
 // untouched. Idempotent: applying the result again returns it unchanged.
-std::string ApplySessionSettings(const std::string& json, uint32_t bitrateMbps);
+std::string ApplySessionSettings(const std::string& json, uint32_t bitrateMbps,
+                                 float maxBufferingFrames);
 
 // Post-handshake stream config server_core negotiated with the client, read from
 // session.json's openvr_config. width/height/fps are 0 when their key is absent.

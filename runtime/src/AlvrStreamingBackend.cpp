@@ -71,7 +71,9 @@ void AlvrStreamingBackend::SyncSessionSettings()
     }
 
     const uint32_t bitrateMbps = std::max(Config::Get().GetValues().bitrateMbps, 1u);
-    const std::string updated = oxrsys::alvr::ApplySessionSettings(json, bitrateMbps);
+    const float maxBufferingFrames = Config::Get().GetValues().alvrMaxBufferingFrames;
+    const std::string updated =
+        oxrsys::alvr::ApplySessionSettings(json, bitrateMbps, maxBufferingFrames);
 
     if (updated == json)
     {
@@ -85,8 +87,8 @@ void AlvrStreamingBackend::SyncSessionSettings()
     }
     out << updated;
     spdlog::info(
-        "OXRSys/ALVR: synced session.json from toml (ConstantMbps={}, max_buffering_frames=1.5)",
-        bitrateMbps);
+        "OXRSys/ALVR: synced session.json from toml (ConstantMbps={}, max_buffering_frames={})",
+        bitrateMbps, maxBufferingFrames);
 }
 
 bool AlvrStreamingBackend::Start(uint32_t renderWidth, uint32_t renderHeight,

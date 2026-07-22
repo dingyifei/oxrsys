@@ -27,6 +27,7 @@ struct ConfigValues
     std::string streamingTransport = "auto"; // "auto", "wifi", "usb_adb"
     std::string streamingProtocol = "oxrsys"; // "oxrsys" (own clients), "alvr" (ALVR client)
     std::string alvrFramePacingMode = "shadow"; // "off", "shadow", "on"
+    float alvrMaxBufferingFrames = 1.5f; // ALVR client decode-queue depth; lower = less latency, less jitter tolerance
     std::string foveatedEncodingPreset = "off"; // "off", "light", "medium", "high"
     std::string clientFoveationPreset = "auto"; // "auto", "off", "light", "medium", "high"
     bool clientUpscaling = false;    // Enable Quest shader upscaling
